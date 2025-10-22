@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Loading entity data...</title>
+  <style>
+    :root{--bg:#0f1724;--card:#0b1220;--accent:#60a5fa;--muted:#94a3b8;--glass:rgba(255,255,255,0.03)}
+    body{font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial; background:linear-gradient(180deg,#071025 0%, #07172a 50%); color:#e6eef8; margin:0; padding:32px; min-height:100vh; display:flex; align-items:flex-start; justify-content:center;}
+    .container{width:980px; max-width:95%; background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border:1px solid rgba(255,255,255,0.03); padding:28px; border-radius:12px; box-shadow:0 10px 30px rgba(2,6,23,0.7)}
+    header{display:flex; align-items:center; gap:16px}
+    h1{font-size:20px; margin:0; letter-spacing:-0.2px}
+    .meta{color:var(--muted); font-size:13px}
+    .grid{display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-top:20px}
+    .card{background:var(--card); padding:18px; border-radius:10px; border:1px solid rgba(255,255,255,0.02)}
+    .label{font-size:13px; color:var(--muted)}
+    .val{font-size:22px; color:#dbeafe; margin-top:8px}
+    .fy{font-weight:600; color:var(--accent); margin-left:8px}
+    #controls{margin-top:20px; display:flex; gap:8px; align-items:center}
+    .btn{background:linear-gradient(180deg, #1f6feb, #1560d6); color:white; padding:10px 14px; border-radius:8px; border:0; cursor:pointer}
+    .btn.secondary{background:transparent; border:1px solid rgba(255,255,255,0.06)}
+    #error-box{background:#3b0b0b; color:#ffdede; padding:12px; border-radius:8px; margin-top:16px; display:none}
+    footer{margin-top:18px; color:var(--muted); font-size:13px}
+    .small{font-size:13px; color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="container" role="main">
+    <header>
+      <div>
+        <h1 id="share-entity-name">Loading entity...</h1>
+        <div class="meta" id="meta-url">Fetching data...</div>
+      </div>
+    </header>
+
+    <div class="grid" aria-live="polite">
+      <div class="card" id="max-card">
+        <div class="label">Maximum shares outstanding (FY > 2020)</div>
+        <div class="val">
+          <span id="share-max-value">—</span>
+          <span class="fy" id="share-max-fy">—</span>
+        </div>
+      </div>
+
+      <div class="card" id="min-card">
+        <div class="label">Minimum shares outstanding (FY > 2020)</div>
+        <div class="val">
+          <span id="share-min-value">—</span>
+          <span class="fy" id="share-min-fy">—</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="controls">
+      <button id="download-data" class="btn">Download data.json</button>
+      <button id="refresh" class="btn secondary">Refresh</button>
+      <div class="small">Open with ?CIK=0001018724 to load a different company (uses proxy).</div>
+    </div>
+
+    <div id="error-box" role="alert"></div>
+
+    <footer>
+      <div class="small">This page fetches live data from the SEC. Check the browser console for diagnostics.</div>
+    </footer>
+  </div>
+
+  <script>
+(function(){
+  'use strict';
+  // Required DOM IDs that the script will write to:
+  const REQUIRED_IDS = ['share-entity-name','share-max-value','share-max-fy','share-min-value','share-min-fy','meta-url','download-data','refresh','error-box'];
+
+  function domCheck(){
+    const missing = REQUIRED_IDS.filter(id => !document.getElementById(id));
+    if(missing.length){
+      const msg = 'Missing required DOM elements: ' + missing.join(', ');
+      showError(msg);
+      console.error(msg);
+      return false;
+    }
+    return true;
+  }
+
+  function showError(msg){
+    const box = document.getElementById('error-box');
+    if(box){
+      box.style.display = 'block';
+      box.textContent = msg;
+    } else {
+      alert(msg);
+    }
+  }
+
+  function clearError(){
+    const box = document.getElementById('error-box');
+    if(box){
+      box.style.display = 'none';
+      box.textContent = '';
+    }
+  }
+
+  // Parse query string for CIK
+  function getQueryCIK(){
+    try{
+      const params = new URLSearchParams(location.search);
+      const cik = params.get('CIK');
+      if(!cik) return null;
+      // Normalize to 10-digit string if possible
+      const digits = cik.replace(/\D/g,'');
+      if(digits.length === 10) return digits;
+      if(digits.length < 10) return digits.padStart(10,'0');
+      // if more than 10, try last 10
+      return digits.slice(-10);
+    }catch(e){
+      return null;
+    }
+  }
+
+  // Build SEC data URL from CIK
+  function secUrlForCIK(cik){
+    return `https://data.sec.gov/api/xbrl/companyconcept/CIK${cik}/dei/EntityCommonStockSharesOutstanding.json`;
+  }
+
+  // Fetch with graceful headers; browsers will usually block User-Agent modifications.
+  async function fetchJson(url, useProxy=false){
+    const meta = document.getElementById('meta-url');
+    if(meta) meta.textContent = 'Fetching: ' + (useProxy ? '(via proxy) ' + url : url);
+    console.log('Starting fetch for URL:', url, 'useProxy:', useProxy);
+
+    const headers = {
+      'Accept': 'application/json',
+      // Attempt to follow SEC guidance (may be ignored by browsers). This is informational.
+      'User-Agent': 'ExampleApp (demo@example.com) - fetch for educational demo'
+    };
+
+    const fetchUrl = useProxy ? ('https://api.allorigins.win/raw?url=' + encodeURIComponent(url)) : url;
+
+    try{
+      const resp = await fetch(fetchUrl, { headers });
+      if(!resp.ok){
+        throw new Error('Network response was not ok: ' + resp.status + ' ' + resp.statusText);
+      }
+      const json = await resp.json();
+      console.log('Fetched JSON keys:', Object.keys(json || {}));
+      return json;
+    }catch(err){
+      console.error('Fetch failed for', fetchUrl, err);
+      throw err;
+    }
+  }
+
+  function isNumeric(n){
+    return typeof n === 'number' && isFinite(n) || (typeof n === 'string' && n.trim() !== '' && !Number.isNaN(Number(n)));
+  }
+
+  function parseEntries(json){
+    // Validate expected keys exist
+    const resolved = { usedKeys: [], ignored: 0 };
+    if(!json || typeof json !== 'object'){
+      throw new Error('Response is not a valid JSON object');
+    }
+    const entityName = json.entityName || json.entity_name || json.EntityName;
+    resolved.usedKeys.push('entityName');
+
+    const units = json.units;
+    if(!units || typeof units !== 'object'){
+      throw new Error('Missing top-level "units" object in JSON');
+    }
+
+    // The structure expected: units.shares is an array
+    const shares = units.shares;
+    if(!Array.isArray(shares)){
+      throw new Error('Missing "units.shares" array in JSON');
+    }
+
+    // Filter: fy > 2020 and val numeric
+    const filtered = [];
+    for(const item of shares){
+      if(!item || typeof item !== 'object'){
+        resolved.ignored++;
+        continue;
+      }
+      const fyRaw = item.fy || item.period || item.fiscalYear || item.fy_string;
+      const valRaw = item.val !== undefined ? item.val : item.numeric;
+
+      // Ensure fy is present and numeric-comparable
+      if(typeof fyRaw === 'undefined' || fyRaw === null){
+        resolved.ignored++;
+        continue;
+      }
+      const fyNum = parseInt(String(fyRaw).replace(/[^\d-]/g,''),10);
+      if(Number.isNaN(fyNum) || fyNum <= 2020){
+        resolved.ignored++;
+        continue;
+      }
+      if(!isNumeric(valRaw)){
+        resolved.ignored++;
+        continue;
+      }
+      const valNum = Number(valRaw);
+      filtered.push({ fy: String(fyRaw), val: valNum, raw: item });
+    }
+
+    resolved.filteredCount = filtered.length;
+    resolved.ignored = resolved.ignored;
+    return { entityName, filtered, resolved };
+  }
+
+  function findMinMax(entries){
+    if(!entries.length) return null;
+    let max = entries[0], min = entries[0];
+    for(const e of entries){
+      if(e.val > max.val) max = e;
+      if(e.val < min.val) min = e;
+    }
+    return { max, min };
+  }
+
+  function updateDOM(data){
+    if(!domCheck()) return;
+    clearError();
+    const entEl = document.getElementById('share-entity-name');
+    const maxValEl = document.getElementById('share-max-value');
+    const maxFyEl = document.getElementById('share-max-fy');
+    const minValEl = document.getElementById('share-min-value');
+    const minFyEl = document.getElementById('share-min-fy');
+
+    entEl.textContent = data.entityName;
+    document.title = data.entityName + ' — Shares Outstanding';
+    maxValEl.textContent = numberWithCommas(data.max.val);
+    maxFyEl.textContent = data.max.fy;
+    minValEl.textContent = numberWithCommas(data.min.val);
+    minFyEl.textContent = data.min.fy;
+  }
+
+  function numberWithCommas(x){
+    if(typeof x !== 'number') return String(x);
+    return x.toLocaleString('en-US', {maximumFractionDigits:6});
+  }
+
+  function prepareDataJson(entityName, max, min){
+    return {
+      entityName: String(entityName || ''),
+      max: { val: Number(max.val), fy: String(max.fy) },
+      min: { val: Number(min.val), fy: String(min.fy) }
+    };
+  }
+
+  function makeDownloadable(jsonObj){
+    const blob = new Blob([JSON.stringify(jsonObj, null, 2)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.getElementById('download-data');
+    if(!a){
+      console.warn('Download element missing; cannot attach data.json download link');
+      return;
+    }
+    a.onclick = function(e){
+      // Create temporary anchor to download
+      const tmp = document.createElement('a');
+      tmp.href = url;
+      tmp.download = 'data.json';
+      document.body.appendChild(tmp);
+      tmp.click();
+      tmp.remove();
+    };
+    console.log('Prepared data.json (not saved to repo):', jsonObj);
+  }
+
+  async function runForCIK(cik, forceProxy=false){
+    if(!domCheck()) return;
+    clearError();
+
+    const url = secUrlForCIK(cik);
+    const useProxy = (cik !== '0001144519') || forceProxy;
+
+    try{
+      const json = await fetchJson(url, useProxy);
+      // Log file used
+      console.log('File used for processing:', url, 'via proxy?', useProxy);
+
+      const parsed = parseEntries(json);
+      console.log('Resolved keys and parsing summary:', parsed.resolved);
+
+      if(parsed.filtered.length === 0){
+        const msg = 'No entries found in units.shares with fy > 2020 and numeric val for CIK ' + cik;
+        showError(msg);
+        console.error(msg);
+        return;
+      }
+
+      const mm = findMinMax(parsed.filtered);
+      if(!mm){
+        showError('Unable to determine min/max from filtered entries.');
+        console.error('findMinMax returned null');
+        return;
+      }
+
+      const dataObj = prepareDataJson(parsed.entityName || ('CIK' + cik), mm.max, mm.min);
+
+      // Validate final shape per requirements
+      if(typeof dataObj.entityName !== 'string' || typeof dataObj.max.val !== 'number' || typeof dataObj.max.fy !== 'string' || typeof dataObj.min.val !== 'number' || typeof dataObj.min.fy !== 'string'){
+        throw new Error('Prepared data.json does not match required shape');
+      }
+
+      // Ensure fy strings represent years > '2020'
+      if(!(Number(dataObj.max.fy.replace(/[^\d]/g,'')) > 2020 && Number(dataObj.min.fy.replace(/[^\d]/g,'')) > 2020)){
+        console.warn('One or both fiscal years are not > 2020:', dataObj.max.fy, dataObj.min.fy);
+      }
+
+      // Update DOM with the results
+      updateDOM(dataObj);
+
+      // Make downloadable data.json
+      makeDownloadable(dataObj);
+
+      // Log details
+      console.log('Final data.json object:', dataObj);
+
+    }catch(err){
+      const msg = 'Error fetching or processing data: ' + (err && err.message ? err.message : String(err));
+      showError(msg);
+      console.error(msg, err);
+    }
+  }
+
+  // Wire up controls
+  document.addEventListener('DOMContentLoaded', function(){
+    if(!domCheck()){
+      return;
+    }
+
+    const defaultCIK = '0001144519';
+    let cik = getQueryCIK() || defaultCIK;
+
+    // Run initial fetch for CIK; if it's default, fetch directly; else use proxy
+    runForCIK(cik, false);
+
+    document.getElementById('refresh').addEventListener('click', function(){
+      const currentCIK = getQueryCIK() || defaultCIK;
+      runForCIK(currentCIK, false);
+    });
+
+    // If user wants to change CIK without reloading, allow prompt (extra convenience)
+    // (Not required but provides a way to dynamically update without reload)
+    document.getElementById('share-entity-name').addEventListener('click', function(){
+      // no-op; just an affordance
+    });
+
+    // Make sure download button exists (already wired in makeDownloadable)
+    const dl = document.getElementById('download-data');
+    if(!dl){
+      console.error('download-data button missing');
+    }
+
+  });
+})();
+  </script>
+</body>
+</html>
